@@ -78,10 +78,17 @@ struct NoteEditor: View {
     // MARK: - Editor View
 
     private func editorView(note: Note) -> some View {
-        TextEditor(text: $content)
-            .font(.body)
-            .contentMargins(.horizontal, 16, for: .scrollContent)
-            .navigationTitle(note.title)
+        Group {
+            #if os(macOS)
+            MacTextEditor(text: $content)
+            #else
+            TextEditor(text: $content)
+                .font(.body)
+                .textEditorStyle(.plain)
+                .contentMargins(.horizontal, 16, for: .scrollContent)
+            #endif
+        }
+        .navigationTitle(note.title)
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     Menu {
@@ -397,3 +404,57 @@ struct NoteEditor: View {
         save()
     }
 }
+
+#if os(macOS)
+import AppKit
+
+private struct MacTextEditor: NSViewRepresentable {
+    @Binding var text: String
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSTextView.scrollableTextView()
+        scrollView.hasVerticalScroller = true
+        scrollView.scrollerStyle = .legacy
+        scrollView.autohidesScrollers = false
+        scrollView.drawsBackground = false
+
+        let textView = scrollView.documentView as! NSTextView
+        textView.font = NSFont.preferredFont(forTextStyle: .body)
+        textView.backgroundColor = .clear
+        textView.drawsBackground = false
+        textView.textContainerInset = NSSize(width: 11, height: 8)
+        textView.textContainer?.lineFragmentPadding = 5
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.allowsUndo = true
+        textView.delegate = context.coordinator
+        textView.string = text
+
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? NSTextView else { return }
+        if textView.string != text {
+            textView.string = text
+        }
+    }
+
+    class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: MacTextEditor
+
+        init(_ parent: MacTextEditor) {
+            self.parent = parent
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            parent.text = textView.string
+        }
+    }
+}
+#endif
