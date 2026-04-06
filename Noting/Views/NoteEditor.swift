@@ -8,9 +8,11 @@ struct NoteEditor: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var sizeClass
+    @Environment(\.openURL) private var openURL
 
     @State private var note: Note?
     @State private var content = ""
+    @State private var selectedText = ""
     @State private var showRenameAlert = false
     @State private var showDeleteConfirm = false
     @State private var showSaveError = false
@@ -80,12 +82,9 @@ struct NoteEditor: View {
     private func editorView(note: Note) -> some View {
         Group {
             #if os(macOS)
-            MacTextEditor(text: $content)
+            MacTextEditor(text: $content, selectedText: $selectedText)
             #else
-            TextEditor(text: $content)
-                .font(.body)
-                .textEditorStyle(.plain)
-                .contentMargins(.horizontal, 16, for: .scrollContent)
+            iOSTextEditor(text: $content, selectedText: $selectedText)
             #endif
         }
         .navigationTitle(note.title)
@@ -113,9 +112,15 @@ struct NoteEditor: View {
                         Button(action: { runInTerminal() }) {
                             Label(String(localized: "runInTerminal"), systemImage: "terminal")
                         }
+                        #endif
+
+                        if !selectedText.isEmpty {
+                            Button(action: { openInBrowser() }) {
+                                Label(String(localized: "openInBrowser"), systemImage: "safari")
+                            }
+                        }
 
                         Divider()
-                        #endif
 
                         if note.isEncrypted && !isLocked {
                             Button(action: { beginChangePassword() }) {
@@ -254,9 +259,10 @@ struct NoteEditor: View {
 
     #if os(macOS)
     private func runInTerminal() {
+        let textToRun = selectedText.isEmpty ? content : selectedText
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("noting_run.command")
         do {
-            try content.write(to: url, atomically: true, encoding: .utf8)
+            try textToRun.write(to: url, atomically: true, encoding: .utf8)
             try FileManager.default.setAttributes(
                 [.posixPermissions: 0o755], ofItemAtPath: url.path
             )
@@ -264,6 +270,15 @@ struct NoteEditor: View {
         NSWorkspace.shared.open(url)
     }
     #endif
+
+    private func openInBrowser() {
+        var urlString = selectedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !urlString.hasPrefix("http://") && !urlString.hasPrefix("https://") {
+            urlString = "https://" + urlString
+        }
+        guard let url = URL(string: urlString) else { return }
+        openURL(url)
+    }
 
     private func deleteNote(note: Note) {
         note.softDelete()
@@ -410,6 +425,7 @@ import AppKit
 
 private struct MacTextEditor: NSViewRepresentable {
     @Binding var text: String
+    @Binding var selectedText: String
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -454,6 +470,67 @@ private struct MacTextEditor: NSViewRepresentable {
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
             parent.text = textView.string
+        }
+
+        func textViewDidChangeSelection(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            let ranges = textView.selectedRanges
+            if let range = ranges.first?.rangeValue, range.length > 0 {
+                parent.selectedText = (textView.string as NSString).substring(with: range)
+            } else {
+                parent.selectedText = ""
+            }
+        }
+    }
+}
+#endif
+
+#if os(iOS)
+import UIKit
+
+private struct iOSTextEditor: UIViewRepresentable {
+    @Binding var text: String
+    @Binding var selectedText: String
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    func makeUIView(context: Context) -> UITextView {
+        let textView = UITextView()
+        textView.font = UIFont.preferredFont(forTextStyle: .body)
+        textView.backgroundColor = .clear
+        textView.textContainerInset = UIEdgeInsets(top: 8, left: 16, bottom: 8, right: 16)
+        textView.textContainer.lineFragmentPadding = 0
+        textView.delegate = context.coordinator
+        textView.text = text
+        return textView
+    }
+
+    func updateUIView(_ textView: UITextView, context: Context) {
+        if textView.text != text {
+            textView.text = text
+        }
+    }
+
+    class Coordinator: NSObject, UITextViewDelegate {
+        var parent: iOSTextEditor
+
+        init(_ parent: iOSTextEditor) {
+            self.parent = parent
+        }
+
+        func textViewDidChange(_ textView: UITextView) {
+            parent.text = textView.text
+        }
+
+        func textViewDidChangeSelection(_ textView: UITextView) {
+            let range = textView.selectedRange
+            if range.length > 0 {
+                parent.selectedText = (textView.text as NSString).substring(with: range)
+            } else {
+                parent.selectedText = ""
+            }
         }
     }
 }
