@@ -1,12 +1,19 @@
 #if os(macOS)
 import AppKit
 import Carbon
+import KeyboardShortcuts
 import SwiftData
+
+extension KeyboardShortcuts.Name {
+    static let autotype = Self(
+        "autotype",
+        default: .init(.v, modifiers: [.command, .control])
+    )
+}
 
 @MainActor
 final class AutotypeService {
     private let container: ModelContainer
-    private var hotKeyRef: EventHotKeyRef?
     private var previousApp: NSRunningApplication?
     private var panel: AutotypePanel?
 
@@ -24,42 +31,9 @@ final class AutotypeService {
             AXIsProcessTrustedWithOptions(options)
         }
 
-        var eventType = EventTypeSpec(
-            eventClass: OSType(kEventClassKeyboard),
-            eventKind: UInt32(kEventHotKeyPressed)
-        )
-
-        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
-
-        InstallEventHandler(
-            GetApplicationEventTarget(),
-            { _, _, userData -> OSStatus in
-                guard let userData else { return OSStatus(eventNotHandledErr) }
-                let service = Unmanaged<AutotypeService>.fromOpaque(userData).takeUnretainedValue()
-                DispatchQueue.main.async {
-                    service.onHotkeyPressed()
-                }
-                return noErr
-            },
-            1,
-            &eventType,
-            selfPtr,
-            nil
-        )
-
-        let hotKeyID = EventHotKeyID(
-            signature: OSType(0x4E4F5447), // "NOTG"
-            id: 1
-        )
-        let modifiers: UInt32 = UInt32(cmdKey | shiftKey)
-        RegisterEventHotKey(
-            UInt32(kVK_ANSI_V),
-            modifiers,
-            hotKeyID,
-            GetApplicationEventTarget(),
-            0,
-            &hotKeyRef
-        )
+        KeyboardShortcuts.onKeyDown(for: .autotype) { [weak self] in
+            self?.onHotkeyPressed()
+        }
     }
 
     private func onHotkeyPressed() {

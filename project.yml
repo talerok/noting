@@ -9,6 +9,11 @@ settings:
   base:
     SWIFT_VERSION: "6.0"
 
+packages:
+  KeyboardShortcuts:
+    url: https://github.com/sindresorhus/KeyboardShortcuts
+    from: 2.0.0
+
 targets:
   Noting:
     type: application
@@ -16,6 +21,8 @@ targets:
     supportedDestinations: [iOS, macOS]
     sources:
       - Noting
+    dependencies:
+      - package: KeyboardShortcuts
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.artem.noting

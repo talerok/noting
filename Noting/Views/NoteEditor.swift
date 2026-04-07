@@ -12,6 +12,7 @@ struct NoteEditor: View {
 
     @State private var note: Note?
     @State private var content = ""
+    @State private var loadedContent: String? = nil
     @State private var selectedText = ""
     @State private var showRenameAlert = false
     @State private var showDeleteConfirm = false
@@ -146,6 +147,10 @@ struct NoteEditor: View {
                 }
             }
             .onChange(of: content) { _, newValue in
+                if let loaded = loadedContent {
+                    loadedContent = nil
+                    if newValue == loaded { return }
+                }
                 debouncer.debounce {
                     saveContent(newValue, note: note)
                 }
@@ -204,9 +209,11 @@ struct NoteEditor: View {
         if let note {
             if note.isEncrypted {
                 isLocked = true
+                loadedContent = ""
                 content = ""
             } else {
                 isLocked = false
+                loadedContent = note.content
                 content = note.content
             }
         }
@@ -225,6 +232,7 @@ struct NoteEditor: View {
                 return
             }
         } else {
+            if note.content == text { return }
             note.content = text
         }
 
@@ -306,6 +314,7 @@ struct NoteEditor: View {
                 let (text, key) = try await CryptoService.decrypt(
                     encrypted, saltBase64: salt, ivBase64: iv, password: passwordInput
                 )
+                loadedContent = text
                 content = text
                 decryptedKey = key
                 isLocked = false

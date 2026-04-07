@@ -15,6 +15,35 @@ final class DropboxSync: @unchecked Sendable {
     private let apiURL = "https://api.dropboxapi.com/2/files"
     private let timeout: TimeInterval = 30
 
+    private let sessionLock = NSLock()
+    private var _urlSession: URLSession = DropboxSync.makeSession()
+
+    private var urlSession: URLSession {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
+        return _urlSession
+    }
+
+    private func resetSession() {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
+        _urlSession.invalidateAndCancel()
+        _urlSession = DropboxSync.makeSession()
+        NSLog("[DropboxSync] URLSession reset")
+    }
+
+    private static func makeSession() -> URLSession {
+        let config = URLSessionConfiguration.default
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        config.urlCache = nil
+        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForResource = 60
+        // Avoid stale keep-alive connections that cause -1005
+        config.httpMaximumConnectionsPerHost = 2
+        config.httpShouldUsePipelining = false
+        return URLSession(configuration: config)
+    }
+
     init(auth: DropboxAuth) {
         self.auth = auth
     }
@@ -211,7 +240,25 @@ final class DropboxSync: @unchecked Sendable {
         jsonBody: [String: Any]? = nil,
         rawBody: Data? = nil
     ) async throws -> HTTPResponse {
-        let maxRetries = 3
+        let maxRetries = 4
+        let retryableCodes: Set<URLError.Code> = [
+            .timedOut,
+            .networkConnectionLost,
+            .notConnectedToInternet,
+            .cannotConnectToHost,
+            .dnsLookupFailed,
+        ]
+        // -1005 happens because of stale keep-alive connections; reset session to clear pool
+        let sessionResetCodes: Set<URLError.Code> = [.networkConnectionLost, .cannotConnectToHost]
+
+        func handleRetry(code: URLError.Code, attempt: Int, error: Error) async throws -> Bool {
+            if attempt == maxRetries - 1 { throw error }
+            if sessionResetCodes.contains(code) {
+                resetSession()
+            }
+            try await Task.sleep(for: .milliseconds(300 * (attempt + 1)))
+            return true
+        }
 
         for attempt in 0..<maxRetries {
             do {
@@ -224,9 +271,11 @@ final class DropboxSync: @unchecked Sendable {
                 }
 
                 return response
-            } catch let error as URLError where [.timedOut, .networkConnectionLost, .notConnectedToInternet].contains(error.code) {
-                if attempt == maxRetries - 1 { throw error }
-                try await Task.sleep(for: .milliseconds(500 * (attempt + 1)))
+            } catch let error as URLError where retryableCodes.contains(error.code) {
+                _ = try await handleRetry(code: error.code, attempt: attempt, error: error)
+            } catch let error as DropboxSyncError where error.urlErrorCode.flatMap({ retryableCodes.contains(URLError.Code(rawValue: $0)) ? URLError.Code(rawValue: $0) : nil }) != nil {
+                let code = URLError.Code(rawValue: error.urlErrorCode!)
+                _ = try await handleRetry(code: code, attempt: attempt, error: error)
             }
         }
 
@@ -261,7 +310,31 @@ final class DropboxSync: @unchecked Sendable {
             request.httpBody = rawBody
         }
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await urlSession.data(for: request)
+        } catch let urlError as URLError {
+            let nsError = urlError as NSError
+            var details: [String] = [
+                "code=\(urlError.code.rawValue)(\(String(describing: urlError.code)))",
+                "url=\(url)",
+            ]
+            if let failingURL = urlError.failingURL?.absoluteString {
+                details.append("failingURL=\(failingURL)")
+            }
+            if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
+                details.append("underlying=\(underlying.domain)#\(underlying.code) \(underlying.localizedDescription)")
+            }
+            details.append("desc=\(urlError.localizedDescription)")
+            let message = details.joined(separator: " | ")
+            NSLog("[DropboxSync] URLError: %@", message)
+            throw DropboxSyncError(statusCode: 0, body: message, urlErrorCode: urlError.code.rawValue)
+        } catch {
+            NSLog("[DropboxSync] Unknown error: %@", String(describing: error))
+            throw error
+        }
+
         guard let httpResponse = response as? HTTPURLResponse else {
             throw DropboxSyncError(statusCode: 0, body: "Invalid HTTP response")
         }
@@ -287,6 +360,7 @@ final class DropboxSync: @unchecked Sendable {
 struct DropboxSyncError: LocalizedError {
     let statusCode: Int
     let body: String
+    var urlErrorCode: Int? = nil
 
     var errorDescription: String? {
         "Dropbox error (\(statusCode)): \(body)"

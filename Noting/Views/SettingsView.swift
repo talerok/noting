@@ -1,4 +1,7 @@
 import SwiftUI
+#if os(macOS)
+import KeyboardShortcuts
+#endif
 
 enum AppAppearance: String, CaseIterable {
     case system, light, dark
@@ -41,6 +44,15 @@ struct SettingsView: View {
                     .pickerStyle(.segmented)
                     .labelsHidden()
                 }
+
+                #if os(macOS)
+                Section(String(localized: "shortcuts")) {
+                    KeyboardShortcuts.Recorder(
+                        String(localized: "autotypeHotkey"),
+                        name: .autotype
+                    )
+                }
+                #endif
 
                 Section(String(localized: "account")) {
                     if syncManager.isConnected {
