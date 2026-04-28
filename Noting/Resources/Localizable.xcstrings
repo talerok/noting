@@ -392,6 +392,23 @@
         }
       }
     },
+    "pendingSync": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Changes pending sync"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ожидает синхронизации"
+          }
+        }
+      }
+    },
     "syncError": {
       "extractionState": "manual",
       "localizations": {

@@ -1,6 +1,12 @@
 import SwiftData
 import SwiftUI
 
+extension Notification.Name {
+    /// Posted when the app is about to leave the foreground or otherwise needs
+    /// any pending in-memory edits flushed to the persistent store immediately.
+    static let flushPendingEdits = Notification.Name("noting.flushPendingEdits")
+}
+
 struct NoteEditor: View {
     let noteId: UUID
     var onDelete: () -> Void
@@ -9,10 +15,16 @@ struct NoteEditor: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var sizeClass
     @Environment(\.openURL) private var openURL
+    @Environment(SyncManager.self) private var syncManager
 
     @State private var note: Note?
     @State private var content = ""
     @State private var loadedContent: String? = nil
+    @State private var hasPendingSave = false
+    /// Last plaintext we successfully wrote to disk. For encrypted notes
+    /// `note.content` is empty, so we keep our own copy to detect no-op saves
+    /// (otherwise every keystroke re-encrypts and bumps the version).
+    @State private var savedPlaintext: String = ""
     @State private var selectedText = ""
     @State private var showRenameAlert = false
     @State private var showDeleteConfirm = false
@@ -46,6 +58,12 @@ struct NoteEditor: View {
         }
         .task(id: noteId) {
             loadNote()
+        }
+        .onDisappear {
+            flushPendingSave()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .flushPendingEdits)) { _ in
+            flushPendingSave()
         }
     }
 
@@ -151,6 +169,7 @@ struct NoteEditor: View {
                     loadedContent = nil
                     if newValue == loaded { return }
                 }
+                hasPendingSave = true
                 debouncer.debounce {
                     saveContent(newValue, note: note)
                 }
@@ -203,6 +222,10 @@ struct NoteEditor: View {
     // MARK: - Actions
 
     private func loadNote() {
+        // Flush any in-flight edits for the previously loaded note before
+        // we replace `note`/`content` with the new selection.
+        flushPendingSave()
+
         let id = noteId
         let descriptor = FetchDescriptor<Note>(predicate: #Predicate { $0.id == id })
         note = try? modelContext.fetch(descriptor).first
@@ -211,18 +234,34 @@ struct NoteEditor: View {
                 isLocked = true
                 loadedContent = ""
                 content = ""
+                savedPlaintext = ""
             } else {
                 isLocked = false
                 loadedContent = note.content
                 content = note.content
+                savedPlaintext = note.content
             }
         }
     }
 
+    /// Forces any pending debounced save to run synchronously. Called when
+    /// the editor is about to switch notes or disappear, so the user's last
+    /// keystrokes never get stranded inside the debouncer.
+    private func flushPendingSave() {
+        debouncer.cancel()
+        guard hasPendingSave, let note else { return }
+        saveContent(content, note: note)
+    }
+
     private func saveContent(_ text: String, note: Note) {
+        hasPendingSave = false
+
         guard !note.isEncrypted || !isLocked else { return }
 
         if note.isEncrypted, let key = decryptedKey, let salt = note.salt {
+            // Skip re-encrypting (and bumping the version) when the plaintext
+            // hasn't actually changed since the last save.
+            if savedPlaintext == text { return }
             do {
                 let payload = try CryptoService.encrypt(text, withDerivedKey: key, saltBase64: salt)
                 note.encryptedContent = payload.encryptedContent
@@ -240,6 +279,8 @@ struct NoteEditor: View {
         note.version += 1
         do {
             try modelContext.save()
+            savedPlaintext = text
+            syncManager.scheduleSync(modelContext: modelContext, activeNoteId: note.id)
         } catch {
             showSaveError = true
         }
@@ -297,6 +338,7 @@ struct NoteEditor: View {
     private func save() {
         do {
             try modelContext.save()
+            syncManager.scheduleSync(modelContext: modelContext, activeNoteId: noteId)
         } catch {
             showSaveError = true
         }
@@ -316,6 +358,7 @@ struct NoteEditor: View {
                 )
                 loadedContent = text
                 content = text
+                savedPlaintext = text
                 decryptedKey = key
                 isLocked = false
                 passwordError = ""
@@ -357,8 +400,10 @@ struct NoteEditor: View {
                     saltBase64: payload.salt
                 )
                 decryptedKey = key
+                savedPlaintext = content
 
                 try modelContext.save()
+                syncManager.scheduleSync(modelContext: modelContext, activeNoteId: note.id)
             } catch {
                 showSaveError = true
             }
@@ -405,6 +450,7 @@ struct NoteEditor: View {
                 decryptedKey = key
 
                 try modelContext.save()
+                syncManager.scheduleSync(modelContext: modelContext, activeNoteId: note.id)
             } catch is CryptoError {
                 passwordError = String(localized: "wrongPassword")
                 showChangePassword = true
@@ -425,6 +471,7 @@ struct NoteEditor: View {
         note.updatedAt = .now
         note.version += 1
         decryptedKey = nil
+        savedPlaintext = content
         save()
     }
 }

@@ -1,6 +1,9 @@
 import CryptoKit
 import Foundation
+import OSLog
 import SwiftData
+
+private let logger = Logger(subsystem: "com.artem.noting", category: "Sync")
 
 /// Manifest-based sync service.
 /// Compares SHA-256 hashes of local note JSON against a remote manifest
@@ -42,6 +45,7 @@ final class SyncService {
         var toDeleteLocal: [String] = []
         var updatedHashes = remoteManifest.noteHashes
         var deletedIds = Set(remoteManifest.deletedNoteIds)
+        var failedCount = 0
 
         for noteId in allNoteIds {
             let localHash = localHashes[noteId]
@@ -86,13 +90,15 @@ final class SyncService {
                         updatedHashes[noteId] = hashContent(savedJson)
                     }
                 } catch {
-                    toUpload.append(noteId)
+                    // Don't blindly fall back to upload — that can clobber
+                    // remote changes we just failed to fetch. Defer to next sync.
+                    logger.error("Conflict download failed for note \(noteId, privacy: .public): \(error.localizedDescription, privacy: .private)")
+                    failedCount += 1
                 }
             }
         }
 
         // 5. Execute uploads
-        var failedCount = 0
         for noteId in toUpload {
             guard let note = localMap[noteId] else { continue }
             do {
@@ -100,6 +106,7 @@ final class SyncService {
                 try await provider.uploadNote(dto)
                 updatedHashes[noteId] = hashContent(dto.toJsonString())
             } catch {
+                logger.error("Upload failed for note \(noteId, privacy: .public): \(error.localizedDescription, privacy: .private)")
                 failedCount += 1
             }
         }
@@ -112,6 +119,7 @@ final class SyncService {
                 let note = try dto.toNote()
                 upsertNote(note, into: modelContext)
             } catch {
+                logger.error("Download failed for note \(noteId, privacy: .public): \(error.localizedDescription, privacy: .private)")
                 failedCount += 1
             }
         }
@@ -125,6 +133,7 @@ final class SyncService {
                 updatedHashes.removeValue(forKey: noteId)
                 deletedIds.insert(noteId)
             } catch {
+                logger.error("Remote delete failed for note \(noteId, privacy: .public): \(error.localizedDescription, privacy: .private)")
                 failedCount += 1
             }
         }
@@ -143,14 +152,22 @@ final class SyncService {
             guard let deletedAt = note.deletedAt, deletedAt < cutoff else { continue }
             let noteId = note.id.uuidString
             if let remoteFile = remoteFileMap[noteId] {
-                try? await provider.deleteRemoteNote(remoteFile.remoteId)
+                do {
+                    try await provider.deleteRemoteNote(remoteFile.remoteId)
+                } catch {
+                    logger.error("Purge of remote note \(noteId, privacy: .public) failed: \(error.localizedDescription, privacy: .private)")
+                }
             }
             updatedHashes.removeValue(forKey: noteId)
             deletedIds.remove(noteId)
             modelContext.delete(note)
         }
 
-        try? modelContext.save()
+        do {
+            try modelContext.save()
+        } catch {
+            logger.error("modelContext.save() during sync failed: \(error.localizedDescription, privacy: .private)")
+        }
 
         // 10. Upload manifest
         let formatter = ISO8601DateFormatter()
@@ -163,8 +180,14 @@ final class SyncService {
         do {
             currentRev = try await provider.uploadManifest(finalManifest.toJsonString(), rev: currentRev)
         } catch {
-            // Manifest upload conflict — will retry next sync
+            // If we can't upload the manifest, the just-uploaded notes are
+            // effectively orphaned until next sync — surface this as a failure
+            // so the caller knows the sync wasn't fully successful.
+            logger.error("Manifest upload failed: \(error.localizedDescription, privacy: .private)")
+            failedCount += 1
         }
+
+        logger.info("Sync done — uploaded: \(toUpload.count), downloaded: \(toDownload.count), remoteDeletes: \(toDeleteRemote.count), localDeletes: \(toDeleteLocal.count), failed: \(failedCount)")
 
         if failedCount > 0 {
             throw SyncError.partialFailure(failedCount)

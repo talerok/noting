@@ -4,6 +4,7 @@ import SwiftData
 
 enum SyncStatus: Equatable {
     case idle
+    case pendingSync
     case syncing
     case synced
     case error(String)
@@ -16,6 +17,8 @@ final class SyncManager {
     var lastSyncTime: Date?
 
     private var syncTask: Task<Void, Never>?
+    private var scheduledSyncTask: Task<Void, Never>?
+    private var pendingSyncRequest: (modelContext: ModelContext, activeNoteId: UUID?)?
 
     let dropboxAuth: DropboxAuth
     private let dropboxSync: DropboxSync
@@ -34,7 +37,15 @@ final class SyncManager {
     }
 
     func sync(modelContext: ModelContext, activeNoteId: UUID? = nil) {
-        guard syncTask == nil else { return }
+        // If a sync is already running, remember to sync again right after.
+        if syncTask != nil {
+            pendingSyncRequest = (modelContext, activeNoteId)
+            return
+        }
+
+        // An immediate sync supersedes any scheduled one.
+        scheduledSyncTask?.cancel()
+        scheduledSyncTask = nil
 
         status = .syncing
         syncTask = Task {
@@ -46,6 +57,30 @@ final class SyncManager {
                 status = .error(error.localizedDescription)
             }
             syncTask = nil
+
+            // Run a queued sync request if one was made while we were syncing.
+            if let pending = pendingSyncRequest {
+                pendingSyncRequest = nil
+                sync(modelContext: pending.modelContext, activeNoteId: pending.activeNoteId)
+            }
+        }
+    }
+
+    /// Debounced sync trigger — used after note edits to coalesce rapid
+    /// changes into a single sync.
+    func scheduleSync(modelContext: ModelContext, activeNoteId: UUID? = nil, delay: Duration = .seconds(3)) {
+        guard isConnected else { return }
+        scheduledSyncTask?.cancel()
+        // Reflect "edits queued for sync" in the UI unless a sync is already
+        // running (in which case the .syncing status is more informative).
+        if syncTask == nil {
+            status = .pendingSync
+        }
+        scheduledSyncTask = Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled, let self else { return }
+            self.scheduledSyncTask = nil
+            self.sync(modelContext: modelContext, activeNoteId: activeNoteId)
         }
     }
 

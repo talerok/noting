@@ -103,6 +103,10 @@ struct SettingsView: View {
         switch syncManager.status {
         case .idle:
             EmptyView()
+        case .pendingSync:
+            Text(String(localized: "pendingSync"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
         case .syncing:
             HStack(spacing: 4) {
                 ProgressView()
